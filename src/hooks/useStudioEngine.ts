@@ -108,15 +108,28 @@ export const useStudioEngine = (): StudioEngine => {
 
   const loadBackingTrackFromFile = async (file: File) => {
     const ctx = initAudioContext();
-    const loadingId = toast.loading(`Loading ${file.name}...`);
+    const loadingId = toast.loading(`Parsing ${file.name}...`);
+    
     try {
-      const arrayBuffer = await file.arrayBuffer();
+      // 手机端更稳妥的做法：先转为 Blob URL
+      const fileUrl = URL.createObjectURL(file);
+      
+      // 如果是视频文件，尝试从视频中提取音频
+      if (file.type.startsWith('video/')) {
+         // 这里如果还报错，说明需要通过 AudioContext 直接处理，
+         // 但通常 URL.createObjectURL + fetch 后的 arrayBuffer 在手机上更稳
+      }
+  
+      const response = await fetch(fileUrl);
+      const arrayBuffer = await response.arrayBuffer();
       const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+      
       setBackingTrackBuffer(audioBuffer);
-      toast.success("Backing track ready!", { id: loadingId });
+      URL.revokeObjectURL(fileUrl); // 释放内存
+      toast.success("Ready!", { id: loadingId });
     } catch (err) {
-      console.error("Failed to load backing track from file:", err);
-      toast.error("Failed to load local file. Ensure it's a valid audio or video file.", { id: loadingId });
+      console.error("手机端解码失败:", err);
+      toast.error("手机暂不支持该格式，请尝试 MP3", { id: loadingId });
     }
   };
 
@@ -128,10 +141,12 @@ export const useStudioEngine = (): StudioEngine => {
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
+        audio: { echoCancellation: true, noiseSuppression: true },
         video: type === 'video'
       });
-
+    
+      streamRef.current = stream;
+      
       micSourceRef.current = ctx.createMediaStreamSource(stream);
       micSourceRef.current.connect(micGainRef.current!);
 
@@ -214,9 +229,16 @@ export const useStudioEngine = (): StudioEngine => {
       const mimeType = recorder.mimeType;
 
       recorder.onstop = async () => {
-        setProcessingProgress(60);
-        await new Promise(r => setTimeout(r, 200));
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach(track => track.stop());
+          streamRef.current = null;
+        }
         
+        if (backingTrackSourceRef.current) {
+          try { backingTrackSourceRef.current.stop(); } catch (e) {}
+          backingTrackSourceRef.current = null;
+        }
+ 
         const mixedBlob = new Blob(chunksRef.current, { type: mimeType });
         const vocalBlob = new Blob(micChunksRef.current, { type: micRecorder.mimeType });
         

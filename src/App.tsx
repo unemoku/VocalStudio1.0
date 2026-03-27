@@ -258,7 +258,7 @@ const WorkCard = ({ work, onDelete, onToggleFeatured, onUpdate, lang }: any) => 
     </motion.div>
   );
 };
-
+  }
 // --- Main App ---
 
 export default function App() {

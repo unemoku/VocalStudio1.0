@@ -397,25 +397,22 @@ const AudioVisualizer = ({
     wavesurferRef.current = ws;
 
     return () => {
-      // 1. 先解除所有事件监听，防止内存回调
+      // 这里的 ws 必须对应你上面定义 WaveSurfer.create 的那个变量名
       if (wavesurferRef.current) {
-        wavesurferRef.current.un('all'); 
-        wavesurferRef.current.destroy();
+        try {
+          wavesurferRef.current.destroy();
+        } catch (e) {
+          console.error("WS Destroy error", e);
+        }
         wavesurferRef.current = null;
       }
-      // 2. 彻底销毁分轨实例
-      if (vocalWsRef.current) {
-        vocalWsRef.current.destroy();
-        vocalWsRef.current = null;
-      }
-      if (backingWsRef.current) {
-        backingWsRef.current.destroy();
-        backingWsRef.current = null;
-      }
-      // 3. 强制清空容器内容
-      if (containerRef.current) {
-        containerRef.current.innerHTML = '';
-      }
+      
+      // 必须加上可选链 ?. 防止这些变量还没创建就执行 destroy
+      vocalWsRef.current?.destroy();
+      backingWsRef.current?.destroy();
+      
+      vocalWsRef.current = null;
+      backingWsRef.current = null;
     };
   }, [url, vocalUrl, backingUrl, t.playbackError, mediaRef]);
 

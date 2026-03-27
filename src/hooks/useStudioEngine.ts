@@ -108,114 +108,94 @@ export const useStudioEngine = (): StudioEngine => {
 
   const loadBackingTrackFromFile = async (file: File) => {
     const ctx = initAudioContext();
-    const loadingId = toast.loading(`Parsing ${file.name}...`);
-    
+    const loadingId = toast.loading(`Loading ${file.name}...`);
     try {
-      // 手机端更稳妥的做法：先转为 Blob URL
-      const fileUrl = URL.createObjectURL(file);
-      
-      // 如果是视频文件，尝试从视频中提取音频
-      if (file.type.startsWith('video/')) {
-         // 这里如果还报错，说明需要通过 AudioContext 直接处理，
-         // 但通常 URL.createObjectURL + fetch 后的 arrayBuffer 在手机上更稳
-      }
-  
-      const response = await fetch(fileUrl);
-      const arrayBuffer = await response.arrayBuffer();
+      const arrayBuffer = await file.arrayBuffer();
       const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-      
       setBackingTrackBuffer(audioBuffer);
-      URL.revokeObjectURL(fileUrl); // 释放内存
-      toast.success("Ready!", { id: loadingId });
+      toast.success("Backing track ready!", { id: loadingId });
     } catch (err) {
-      console.error("手机端解码失败:", err);
-      toast.error("手机暂不支持该格式，请尝试 MP3", { id: loadingId });
+      console.error("Failed to load backing track from file:", err);
+      toast.error("Failed to load local file. Ensure it's a valid audio or video file.", { id: loadingId });
     }
   };
 
-    const startRecording = async (type: 'audio' | 'video') => {
-    // 1. 确保 AudioContext 处于运行状态（这是麦克风成功的关键）
+  const startRecording = async (type: 'audio' | 'video') => {
     const ctx = initAudioContext();
-    if (ctx.state === 'suspended') {
-      await ctx.resume();
-    }
-
     chunksRef.current = [];
-    micChunksRef.current = [];
     setIsProcessing(false);
     setProcessingProgress(0);
 
     try {
-      // 2. 最简单的流请求，减少报错概率
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        },
+        audio: true,
         video: type === 'video'
       });
 
-      // 3. 【核心修复】立即锁定流引用，防止被回收
-      streamRef.current = stream;
-
-      // 4. 绑定麦克风到引擎
-      if (!micGainRef.current) {
-        micGainRef.current = ctx.createGain();
-        micGainRef.current.connect(destinationRef.current!);
-      }
-      
       micSourceRef.current = ctx.createMediaStreamSource(stream);
-      micSourceRef.current.connect(micGainRef.current);
+      micSourceRef.current.connect(micGainRef.current!);
 
-      // 5. 设置录制参数
+      // Set volumes
+      backingTrackGainRef.current!.gain.value = backingTrackVolume;
+      micGainRef.current!.gain.value = micVolume;
+
+      // Setup MediaRecorder for mixed stream
       let finalStream = destinationRef.current!.stream;
       if (type === 'video') {
         const videoTrack = stream.getVideoTracks()[0];
-        // 合并音轨和视轨
         finalStream = new MediaStream([videoTrack, ...destinationRef.current!.stream.getAudioTracks()]);
       }
 
+      // Setup MediaRecorder for raw mic stream (audio only for post-mix)
       const micStream = new MediaStream(stream.getAudioTracks());
-      
-      // 检查支持的格式
-      const mimeType = type === 'video' ? 'video/webm;codecs=vp8,opus' : 'audio/webm;codecs=opus';
-      const options = MediaRecorder.isTypeSupported(mimeType) ? { mimeType } : {};
 
-      mediaRecorderRef.current = new MediaRecorder(finalStream, options);
-      micRecorderRef.current = new MediaRecorder(micStream);
+      // MIME Type selection
+      const mimeTypes = type === 'video' 
+        ? ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4']
+        : ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4', 'audio/aac', 'audio/mpeg'];
       
-      mediaRecorderRef.current.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
-      micRecorderRef.current.ondataavailable = (e) => { if (e.data.size > 0) micChunksRef.current.push(e.data); };
-
-      // 6. 播放伴奏（如果有）
-      if (backingTrackBuffer) {
-        if (backingTrackSourceRef.current) {
-          try { backingTrackSourceRef.current.stop(); } catch(e) {}
+      let selectedMimeType = '';
+      for (const t of mimeTypes) {
+        if (MediaRecorder.isTypeSupported(t)) {
+          selectedMimeType = t;
+          break;
         }
+      }
+
+      const options = selectedMimeType ? { mimeType: selectedMimeType } : {};
+      mediaRecorderRef.current = new MediaRecorder(finalStream, options);
+      micRecorderRef.current = new MediaRecorder(micStream, { mimeType: selectedMimeType.includes('video') ? 'audio/webm' : selectedMimeType });
+      
+      chunksRef.current = [];
+      micChunksRef.current = [];
+
+      mediaRecorderRef.current.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
+      };
+
+      micRecorderRef.current.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) micChunksRef.current.push(e.data);
+      };
+
+      // Start backing track if available
+      if (backingTrackBuffer) {
         backingTrackSourceRef.current = ctx.createBufferSource();
         backingTrackSourceRef.current.buffer = backingTrackBuffer;
         backingTrackSourceRef.current.connect(backingTrackGainRef.current!);
         backingTrackSourceRef.current.start(0);
       }
 
-      // 7. 正式启动录制
       mediaRecorderRef.current.start(1000);
       micRecorderRef.current.start(1000);
-      
       setIsRecording(true);
       setRecordingTime(0);
-      if (timerRef.current) clearInterval(timerRef.current);
-      timerRef.current = window.setInterval(() => setRecordingTime(prev => prev + 1), 1000);
+      timerRef.current = window.setInterval(() => {
+        setRecordingTime(prev => prev + 1);
+      }, 1000);
 
     } catch (err) {
-      console.error("Critical error in StudioEngine:", err);
-      // 如果失败，确保清理掉已经打开的流
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(t => t.stop());
-        streamRef.current = null;
-      }
-      throw err; // 将错误抛给 App.tsx 的 toast
+      console.error("[StudioEngine] Studio recording failed:", err);
+      toast.error("Failed to start recording. Please ensure microphone access is granted.");
     }
   };
 
@@ -234,16 +214,9 @@ export const useStudioEngine = (): StudioEngine => {
       const mimeType = recorder.mimeType;
 
       recorder.onstop = async () => {
-        if (streamRef.current) {
-          streamRef.current.getTracks().forEach(track => track.stop());
-          streamRef.current = null;
-        }
+        setProcessingProgress(60);
+        await new Promise(r => setTimeout(r, 200));
         
-        if (backingTrackSourceRef.current) {
-          try { backingTrackSourceRef.current.stop(); } catch (e) {}
-          backingTrackSourceRef.current = null;
-        }
- 
         const mixedBlob = new Blob(chunksRef.current, { type: mimeType });
         const vocalBlob = new Blob(micChunksRef.current, { type: micRecorder.mimeType });
         

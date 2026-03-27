@@ -189,18 +189,18 @@ const AudioVisualizer = ({ url, className, lang, mediaRef }: any) => {
 
     // --- 彻底的清理逻辑 ---
     return () => {
-      isDestroyed = true;
-      
-      // 1. 清理主轨道
+      // 1. 这里的 ws 必须对应你上面定义 WaveSurfer.create 的那个变量名
       if (wavesurferRef.current) {
         try {
-          wavesurferRef.current.unAll(); 
+          wavesurferRef.current.unAll(); // 切断事件，防止残留回调报错
           wavesurferRef.current.destroy();
-        } catch (e) {}
+        } catch (e) {
+          console.warn("清理主轨失败", e);
+        }
         wavesurferRef.current = null;
       }
-
-      // 2. 清理分轨（这是防止黑屏的关键）
+      
+      // 2. 清理分轨：必须带问号，防止没加载伴奏时报错导致黑屏
       if (vocalWsRef.current) {
         try { vocalWsRef.current.destroy(); } catch (e) {}
         vocalWsRef.current = null;
@@ -210,12 +210,12 @@ const AudioVisualizer = ({ url, className, lang, mediaRef }: any) => {
         backingWsRef.current = null;
       }
 
-      // 3. 彻底清空 DOM 容器
+      // 3. 物理清空 DOM 容器：解决手机划不动、内存爆掉的大招
       if (containerRef.current) {
         containerRef.current.innerHTML = '';
       }
     };
-  }, [url, vocalUrl, backingUrl, vocalVolume, backingVolume]); // 别忘了补全这些依赖项
+  }, [url, vocalUrl, backingUrl, t.playbackError, mediaRef]);
 
   return (
     <div className={cn("flex items-center gap-4 bg-white/5 p-4 rounded-xl border border-white/10", className)}>
@@ -277,21 +277,14 @@ export default function App() {
  // 【最终修复版】麦克风与视频流统一管理
   const startRecording = async () => {
     try {
-      // 1. 启动录音引擎
+      // 只保留这一行！让 studio 引擎去处理权限申请
       await studio.startRecording(recordingType);
       
-      // 2. 如果是视频模式，尝试获取流并显示在预览框
-      // 我们直接再次获取流是最高效的，但要确保 studio 内部已经处理好权限
-      if (recordingType === 'video' && videoPreviewRef.current) {
-        const stream = await navigator.mediaDevices.getUserMedia({ 
-          video: true, 
-          audio: true 
-        });
-        videoPreviewRef.current.srcObject = stream;
-      }
+      // 如果是视频录制，预览流已经在 useStudioEngine 里的 startRecording 逻辑中处理好了
+      // 如果预览窗没画面，那是因为 App.tsx 里的 <video> 没拿到流。
     } catch (err) { 
-      console.error("Recording start error:", err);
-      toast.error(language === 'zh' ? "麦克风或摄像头启动失败，请检查权限" : "Failed to start media devices"); 
+      console.error("Mic failed:", err);
+      toast.error("麦克风启动失败，请检查浏览器顶部权限提示");
     }
   };
 

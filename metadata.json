@@ -1,0 +1,8 @@
+{
+  "name": "Vocal Studio (练歌房)",
+  "description": "A professional vocal practice management app with video/audio recording, automatic audio extraction, and song categorization.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

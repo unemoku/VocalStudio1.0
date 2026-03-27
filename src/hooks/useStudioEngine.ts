@@ -133,26 +133,28 @@ export const useStudioEngine = (): StudioEngine => {
     }
   };
 
-  const startRecording = async (type: 'audio' | 'video') => {
-    const ctx = initAudioContext();
-    chunksRef.current = [];
-    setIsProcessing(false);
-    setProcessingProgress(0);
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true },
-        video: type === 'video'
-      });
+    const startRecording = async (type: 'audio' | 'video') => {
+        const ctx = initAudioContext();
+        chunksRef.current = [];
+        micChunksRef.current = [];
     
-      streamRef.current = stream;
-      
-      micSourceRef.current = ctx.createMediaStreamSource(stream);
-      micSourceRef.current.connect(micGainRef.current!);
-
-      // Set volumes
-      backingTrackGainRef.current!.gain.value = backingTrackVolume;
-      micGainRef.current!.gain.value = micVolume;
+        try {
+          // 直接请求，不做任何花哨的配置
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+            video: type === 'video'
+          });
+    
+          // 立即保存引用，防止被回收
+          streamRef.current = stream;
+    
+          // 绑定到 AudioContext
+          micSourceRef.current = ctx.createMediaStreamSource(stream);
+          micSourceRef.current.connect(micGainRef.current!);
+    
+          // Set volumes
+          backingTrackGainRef.current!.gain.value = backingTrackVolume;
+          micGainRef.current!.gain.value = micVolume;
 
       // Setup MediaRecorder for mixed stream
       let finalStream = destinationRef.current!.stream;
@@ -176,7 +178,8 @@ export const useStudioEngine = (): StudioEngine => {
           break;
         }
       }
-
+        
+      
       const options = selectedMimeType ? { mimeType: selectedMimeType } : {};
       mediaRecorderRef.current = new MediaRecorder(finalStream, options);
       micRecorderRef.current = new MediaRecorder(micStream, { mimeType: selectedMimeType.includes('video') ? 'audio/webm' : selectedMimeType });

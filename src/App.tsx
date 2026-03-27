@@ -397,9 +397,25 @@ const AudioVisualizer = ({
     wavesurferRef.current = ws;
 
     return () => {
-      ws.destroy();
-      vocalWsRef.current?.destroy();
-      backingWsRef.current?.destroy();
+      // 1. 先解除所有事件监听，防止内存回调
+      if (wavesurferRef.current) {
+        wavesurferRef.current.un('all'); 
+        wavesurferRef.current.destroy();
+        wavesurferRef.current = null;
+      }
+      // 2. 彻底销毁分轨实例
+      if (vocalWsRef.current) {
+        vocalWsRef.current.destroy();
+        vocalWsRef.current = null;
+      }
+      if (backingWsRef.current) {
+        backingWsRef.current.destroy();
+        backingWsRef.current = null;
+      }
+      // 3. 强制清空容器内容
+      if (containerRef.current) {
+        containerRef.current.innerHTML = '';
+      }
     };
   }, [url, vocalUrl, backingUrl, t.playbackError, mediaRef]);
 
@@ -916,30 +932,38 @@ export default function App() {
     if (videoPreviewRef.current) videoPreviewRef.current.srcObject = null;
   };
 
-  const onDrop = useCallback((acceptedFiles: File[]) => {
-    acceptedFiles.forEach(file => {
-      const url = URL.createObjectURL(file);
+  const onDrop = useCallback(async (acceptedFiles: File[]) => {
+    for (const file of acceptedFiles) {
       const isVideo = file.type.startsWith('video/');
       const isAudio = file.type.startsWith('audio/');
       
       if (!isVideo && !isAudio) {
-        toast.error(`Unsupported file type: ${file.name}`);
-        return;
+        toast.error(`不支持的文件类型: ${file.name}`);
+        continue;
       }
-
-      const newWork: Work = {
-        id: crypto.randomUUID(),
-        title: file.name.split('.')[0],
-        songCategory: "Imported",
-        fileUrl: url,
-        mediaType: isVideo ? 'video' : 'audio',
-        isFeatured: false,
-        createdAt: Date.now(),
-      };
-
-      setWorks(prev => [newWork, ...prev]);
-      toast.success(`Imported ${file.name}`);
-    });
+  
+      const loadingId = toast.loading(`正在导入 ${file.name}...`);
+      try {
+        const workId = crypto.randomUUID();
+        // 【关键】手机版直接存入数据库，而不是用不稳定的临时 Blob URL
+        await saveBlob(workId, file);
+  
+        const newWork: Work = {
+          id: workId,
+          title: file.name.split('.')[0],
+          songCategory: "Imported",
+          fileUrl: workId, // 存入 ID
+          mediaType: isVideo ? 'video' : 'audio',
+          isFeatured: false,
+          createdAt: Date.now(),
+        };
+  
+        setWorks(prev => [newWork, ...prev]);
+        toast.success(`成功导入 ${file.name}`, { id: loadingId });
+      } catch (err) {
+        toast.error("导入失败，请重试", { id: loadingId });
+      }
+    }
   }, [works]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({ 

@@ -154,31 +154,85 @@ const AudioVisualizer = ({ url, className, lang, mediaRef }: any) => {
       backend: 'MediaElement',
       media: mediaRef?.current || undefined,
     });
-    ws.on('ready', () => !isDestroyed && setIsLoading(false));
-    ws.on('play', () => setIsPlaying(true));
-    ws.on('pause', () => setIsPlaying(false));
-    ws.load(url);
+// 监听事件
+    ws.on('ready', () => {
+      if (!isDestroyed) {
+        setIsLoading(false);
+        // 同步初始状态
+        if (vocalWsRef.current) vocalWsRef.current.setVolume(vocalVolume);
+        if (backingWsRef.current) backingWsRef.current.setVolume(backingVolume);
+      }
+    });
+
+    ws.on('play', () => {
+      setIsPlaying(true);
+      // 【关键同步】
+      vocalWsRef.current?.play();
+      backingWsRef.current?.play();
+    });
+
+    ws.on('pause', () => {
+      setIsPlaying(false);
+      // 【关键同步】
+      vocalWsRef.current?.pause();
+      backingWsRef.current?.pause();
+    });
+
+    ws.on('seeking', (time) => {
+      // 【关键同步】拖动进度条时，分轨也要跟着跳
+      vocalWsRef.current?.setTime(time);
+      backingWsRef.current?.setTime(time);
+    });
+
+    ws.load(url).catch(e => console.warn("WaveSurfer load error:", e));
     wavesurferRef.current = ws;
+
+    // --- 彻底的清理逻辑 ---
     return () => {
       isDestroyed = true;
+      
+      // 1. 清理主轨道
       if (wavesurferRef.current) {
-        wavesurferRef.current.unAll();
-        wavesurferRef.current.destroy();
+        try {
+          wavesurferRef.current.unAll(); 
+          wavesurferRef.current.destroy();
+        } catch (e) {}
         wavesurferRef.current = null;
       }
-      if (containerRef.current) containerRef.current.innerHTML = '';
+
+      // 2. 清理分轨（这是防止黑屏的关键）
+      if (vocalWsRef.current) {
+        try { vocalWsRef.current.destroy(); } catch (e) {}
+        vocalWsRef.current = null;
+      }
+      if (backingWsRef.current) {
+        try { backingWsRef.current.destroy(); } catch (e) {}
+        backingWsRef.current = null;
+      }
+
+      // 3. 彻底清空 DOM 容器
+      if (containerRef.current) {
+        containerRef.current.innerHTML = '';
+      }
     };
-  }, [url]);
+  }, [url, vocalUrl, backingUrl, vocalVolume, backingVolume]); // 别忘了补全这些依赖项
 
   return (
     <div className={cn("flex items-center gap-4 bg-white/5 p-4 rounded-xl border border-white/10", className)}>
-      <button onClick={() => wavesurferRef.current?.playPause()} className="w-10 h-10 bg-indigo-600 rounded-full flex items-center justify-center shrink-0">
+      <button 
+        onClick={() => {
+          // 点击播放/暂停时，我们要确保所有轨道同步动作
+          if (wavesurferRef.current) {
+            wavesurferRef.current.playPause();
+          }
+        }} 
+        className="w-10 h-10 bg-indigo-600 rounded-full flex items-center justify-center shrink-0 hover:bg-indigo-500 transition-colors"
+      >
         {isPlaying ? <Pause size={20} /> : <Play size={20} className="ml-1" />}
       </button>
       <div ref={containerRef} className="flex-1 min-w-0" />
     </div>
   );
-};
 
 const WorkCard = ({ work, onDelete, onToggleFeatured, onUpdate, lang }: any) => {
   const [isEditing, setIsEditing] = useState(false);
@@ -220,38 +274,98 @@ export default function App() {
   const t = translations[language];
   const videoPreviewRef = useRef<HTMLVideoElement>(null);
 
-  // 【修复版】麦克风权限单一管理
+ // 【最终修复版】麦克风与视频流统一管理
   const startRecording = async () => {
     try {
+      // 1. 启动录音引擎
       await studio.startRecording(recordingType);
-      // 注意：如果是视频录制，预览流由 studio 内部维护
-    } catch (err) { toast.error("麦克风启动失败"); }
+      
+      // 2. 如果是视频模式，尝试获取流并显示在预览框
+      // 我们直接再次获取流是最高效的，但要确保 studio 内部已经处理好权限
+      if (recordingType === 'video' && videoPreviewRef.current) {
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          video: true, 
+          audio: true 
+        });
+        videoPreviewRef.current.srcObject = stream;
+      }
+    } catch (err) { 
+      console.error("Recording start error:", err);
+      toast.error(language === 'zh' ? "麦克风或摄像头启动失败，请检查权限" : "Failed to start media devices"); 
+    }
   };
 
   const stopRecording = async () => {
     const loadingId = toast.loading(t.finalizingRecording);
+    
+    // 1. 停止预览流（关掉摄像头绿灯）
+    if (videoPreviewRef.current && videoPreviewRef.current.srcObject) {
+      const stream = videoPreviewRef.current.srcObject as MediaStream;
+      stream.getTracks().forEach(track => track.stop());
+      videoPreviewRef.current.srcObject = null;
+    }
+
     const result = await studio.stopRecording();
+    
     if (result) {
+      const { mixed, vocal } = result;
       const workId = crypto.randomUUID();
-      await saveBlob(workId, result.mixed);
-      await saveBlob(`vocal-${workId}`, result.vocal);
-      const newWork: Work = { id: workId, title: `${t.studioSession} ${new Date().toLocaleDateString()}`, songCategory: t.studioSessions, fileUrl: workId, vocalUrl: `vocal-${workId}`, mediaType: recordingType, isFeatured: false, createdAt: Date.now() };
+      const vocalId = `vocal-${workId}`;
+      
+      // 2. 持久化存储到 IndexedDB
+      await saveBlob(workId, mixed);
+      await saveBlob(vocalId, vocal);
+      
+      const newWork: Work = { 
+        id: workId, 
+        title: `${t.studioSession} ${new Date().toLocaleDateString()}`, 
+        songCategory: t.studioSessions, 
+        fileUrl: workId, 
+        vocalUrl: vocalId, 
+        backingUrl: backingTrackUrl || undefined,
+        vocalVolume: studio.micVolume,
+        backingVolume: studio.backingTrackVolume,
+        mediaType: recordingType, 
+        isFeatured: false, 
+        createdAt: Date.now() 
+      };
+      
       setWorks(prev => [newWork, ...prev]);
       toast.success(t.recordingSaved, { id: loadingId });
+    } else {
+      toast.dismiss(loadingId);
     }
+    
     setShowRecorder(false);
   };
 
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
     for (const file of acceptedFiles) {
-      const id = crypto.randomUUID();
-      await saveBlob(id, file);
-      const newWork: Work = { id, title: file.name.split('.')[0], songCategory: "Imported", fileUrl: id, mediaType: file.type.startsWith('video/') ? 'video' : 'audio', isFeatured: false, createdAt: Date.now() };
-      setWorks(prev => [newWork, ...prev]);
-      toast.success(`Imported ${file.name}`);
+      const loadingId = toast.loading(language === 'zh' ? `正在导入 ${file.name}...` : `Importing ${file.name}...`);
+      try {
+        const id = crypto.randomUUID();
+        // 关键：手机端持久化存储
+        await saveBlob(id, file);
+        
+        const newWork: Work = { 
+          id, 
+          title: file.name.split('.')[0], 
+          songCategory: "Imported", 
+          fileUrl: id, 
+          mediaType: file.type.startsWith('video/') ? 'video' : 'audio', 
+          isFeatured: false, 
+          createdAt: Date.now() 
+        };
+        
+        setWorks(prev => [newWork, ...prev]);
+        toast.success(language === 'zh' ? "导入成功" : "Import successful", { id: loadingId });
+      } catch (err) {
+        toast.error(language === 'zh' ? "导入失败" : "Import failed", { id: loadingId });
+      }
     }
-  }, []);
+  }, [language]);
 
+  
   const { getRootProps, getInputProps } = useDropzone({ onDrop });
 
   useEffect(() => {
